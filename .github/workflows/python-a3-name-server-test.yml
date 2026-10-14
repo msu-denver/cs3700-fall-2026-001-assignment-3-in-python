@@ -1,0 +1,309 @@
+# CS 3700 Assignment 3 (Python): a from-scratch Pyro5 name server.
+#
+# What students submit:
+#   name_server.py   starts the name server on localhost:9090 (no arguments)
+#   SOURCES.md       every source used, including AI tools and prompts
+#   tests/           pytest unit tests (test_*.py)
+#
+# The grading check runs the real, unmodified `pyro5-nsc list` (default
+# serpent serializer) against the student's server and expects exactly:
+#
+#   --------START LIST
+#   Pyro.NameServer --> PYRO:Pyro.NameServer@localhost:9090
+#       metadata: {'class:Pyro5.nameserver.NameServer'}
+#   --------END LIST
+#
+# Static analysis is worth 20% of the grade; its score is shown on the
+# workflow run's Summary page.
+
+name: A3 Python Name Server Test
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+# The workflow only needs to read the repository.
+permissions:
+  contents: read
+
+defaults:
+  run:
+    # "bash" (rather than the default) adds -o pipefail, so a failing
+    # command piped into tee still fails the step.
+    shell: bash
+
+env:
+  SERVER_FILE: name_server.py
+  PYRO_SERIALIZER: serpent
+  PYTHON_VERSION: '3.13'
+  PYRO5_VERSION: '5.17'
+  RUFF_VERSION: '0.16.10'
+  PYTEST_VERSION: '9.1.1'
+  PYTEST_COV_VERSION: '7.1.0'
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Academic integrity: sources are cited, and the Pyro5 library isn't used.
+  # ---------------------------------------------------------------------------
+  integrity:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      with:
+        persist-credentials: false
+
+    - name: Check SOURCES.md (AI and source attribution)
+      run: |
+        if [ ! -s SOURCES.md ]; then
+          echo "::error file=SOURCES.md::SOURCES.md is missing or empty. Cite every source, including AI tools and your prompts."
+          exit 1
+        fi
+        {
+          echo "## SOURCES.md"
+          echo '```'
+          cat SOURCES.md
+          echo '```'
+        } >> "$GITHUB_STEP_SUMMARY"
+        echo "✓ SOURCES.md found"
+
+    - name: Check that the Pyro5 library is not used
+      run: |
+        # Tests may use Pyro5 to check the server; the server itself may not.
+        search_student_code() {
+          grep -rn -E "$1" . --include='*.py' --exclude='test_*.py' --exclude-dir=tests --exclude-dir=.git
+        }
+
+        found=0
+        for pattern in 'import Pyro5' 'from Pyro5' 'Pyro5\.nameserver' 'pyro5-ns'; do
+          if search_student_code "$pattern"; then
+            echo "::error::Found '$pattern'. The name server must be written from scratch."
+            found=1
+          fi
+        done
+
+        # Allowed, but worth a look when grading.
+        if search_student_code 'import serpent|from serpent'; then
+          echo "::warning::Uses the serpent library instead of encoding serpent by hand."
+        fi
+
+        if [ "$found" -eq 1 ]; then
+          exit 1
+        fi
+        echo "✓ No Pyro5 library use found"
+
+  # ---------------------------------------------------------------------------
+  # Static analysis: 20 points. Lint issues and security findings cost points.
+  # ---------------------------------------------------------------------------
+  static-analysis:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      MAX_POINTS: 20
+      LINT_ISSUES_PER_POINT: 2      # every 2 lint issues cost 1 point...
+      MAX_LINT_PENALTY: 10          # ...up to 10 points
+      POINTS_PER_SECURITY_ISSUE: 2  # every security finding costs 2 points...
+      MAX_SECURITY_PENALTY: 10      # ...up to 10 points
+
+    steps:
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      with:
+        persist-credentials: false
+
+    - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
+      with:
+        python-version: ${{ env.PYTHON_VERSION }}
+
+    - name: Install ruff
+      run: pip install "ruff==$RUFF_VERSION"
+
+    - name: Lint (ruff, pycodestyle + pyflakes + bugbear rules)
+      run: |
+        mkdir -p logs
+        ruff check . --select E,W,F,B --output-format concise | tee logs/lint.txt || true
+        ruff check . --select E,W,F,B --output-format json > logs/lint.json || true
+
+    - name: Security scan (ruff's bandit rules)
+      run: |
+        # Tests are skipped: they use assert and test-only shortcuts.
+        ruff check . --select S --extend-exclude 'tests,test_*.py' --output-format concise | tee logs/security.txt || true
+        ruff check . --select S --extend-exclude 'tests,test_*.py' --output-format json > logs/security.json || true
+
+    - name: Compute static analysis score
+      run: |
+        count_issues() {
+          python -c 'import json, sys; print(len(json.load(open(sys.argv[1]))))' "$1"
+        }
+        lint_count=$(count_issues logs/lint.json)
+        security_count=$(count_issues logs/security.json)
+
+        lint_penalty=$(( lint_count / LINT_ISSUES_PER_POINT ))
+        if [ "$lint_penalty" -gt "$MAX_LINT_PENALTY" ]; then
+          lint_penalty=$MAX_LINT_PENALTY
+        fi
+        security_penalty=$(( security_count * POINTS_PER_SECURITY_ISSUE ))
+        if [ "$security_penalty" -gt "$MAX_SECURITY_PENALTY" ]; then
+          security_penalty=$MAX_SECURITY_PENALTY
+        fi
+        score=$(( MAX_POINTS - lint_penalty - security_penalty ))
+
+        {
+          echo "## Static analysis: $score / $MAX_POINTS"
+          echo ""
+          echo "| Check | Issues | Points lost |"
+          echo "|---|---|---|"
+          echo "| Lint (ruff E,W,F,B) | $lint_count | $lint_penalty |"
+          echo "| Security (ruff S) | $security_count | $security_penalty |"
+          echo ""
+          echo "Details are in the step logs and the static-analysis artifact."
+        } | tee -a "$GITHUB_STEP_SUMMARY"
+        echo "$score" > logs/score.txt
+
+    - name: Upload static analysis reports
+      if: always()
+      uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+      with:
+        name: static-analysis
+        path: logs/
+
+  # ---------------------------------------------------------------------------
+  # Unit tests with coverage.
+  # ---------------------------------------------------------------------------
+  unit-tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      with:
+        persist-credentials: false
+
+    - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
+      with:
+        python-version: ${{ env.PYTHON_VERSION }}
+
+    - name: Install test tools
+      run: |
+        pip install "Pyro5==$PYRO5_VERSION" "pytest==$PYTEST_VERSION" "pytest-cov==$PYTEST_COV_VERSION"
+        if [ -f requirements.txt ]; then
+          pip install -r requirements.txt
+        fi
+
+    - name: Run pytest with coverage
+      run: |
+        mkdir -p logs
+        if ! find . -name 'test_*.py' -not -path './.git/*' | grep -q .; then
+          echo "::warning::No unit tests found (expected tests/test_*.py)."
+          exit 0
+        fi
+        # "python -m pytest" puts the repository root on the import path,
+        # so tests can import name_server.
+        python -m pytest -v --cov=. --cov-report=term-missing --cov-report=html:logs/coverage 2>&1 | tee logs/pytest.txt
+
+    - name: Upload test and coverage reports
+      if: always()
+      uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+      with:
+        name: unit-tests
+        path: logs/
+        if-no-files-found: ignore
+
+  # ---------------------------------------------------------------------------
+  # Grading hook: the real pyro5-nsc must list the student's name server.
+  # ---------------------------------------------------------------------------
+  name-server:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      with:
+        persist-credentials: false
+
+    - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
+      with:
+        python-version: ${{ env.PYTHON_VERSION }}
+
+    - name: Install Pyro5 (for the pyro5-nsc client only)
+      run: pip install "Pyro5==$PYRO5_VERSION"
+
+    - name: Start the student's name server
+      run: |
+        mkdir -p logs
+        if [ ! -f "$SERVER_FILE" ]; then
+          echo "::error::$SERVER_FILE not found."
+          exit 1
+        fi
+        python -u "$SERVER_FILE" > logs/server.txt 2>&1 &
+        echo $! > server.pid
+
+    - name: Wait for the server to listen on port 9090
+      run: |
+        for _ in $(seq 1 20); do
+          # /proc/net/tcp and tcp6 list open sockets: 2382 is port 9090 in hex,
+          # and state 0A means LISTEN. Reading them never touches the server.
+          if grep -q -E ':2382 [0-9A-F]+:[0-9A-F]+ 0A' /proc/net/tcp /proc/net/tcp6 2>/dev/null; then
+            echo "✓ Listening on port 9090"
+            exit 0
+          fi
+          if ! kill -0 "$(cat server.pid)" 2>/dev/null; then
+            echo "::error::The server exited before listening on port 9090."
+            cat logs/server.txt
+            exit 1
+          fi
+          sleep 1
+        done
+        echo "::error::Nothing listening on port 9090 after 20 seconds."
+        cat logs/server.txt
+        exit 1
+
+    - name: Run pyro5-nsc list and compare the output
+      run: |
+        # Note the trailing space after "START LIST" and "END LIST".
+        printf '%s\n' \
+          '--------START LIST ' \
+          'Pyro.NameServer --> PYRO:Pyro.NameServer@localhost:9090' \
+          "    metadata: {'class:Pyro5.nameserver.NameServer'}" \
+          '--------END LIST ' > logs/expected.txt
+
+        timeout 30 pyro5-nsc list > logs/actual.txt 2> logs/nsc-errors.txt || true
+
+        if diff -u logs/expected.txt logs/actual.txt > logs/diff.txt; then
+          echo "✓ pyro5-nsc list output matches" | tee -a "$GITHUB_STEP_SUMMARY"
+          exit 0
+        fi
+
+        echo "✗ pyro5-nsc list output does not match"
+        echo "=== Differences (- expected, + actual; \$ marks end of line) ==="
+        sed 's/$/$/' logs/diff.txt
+        echo "=== pyro5-nsc errors ==="
+        cat logs/nsc-errors.txt
+        {
+          echo "## ✗ pyro5-nsc list output does not match"
+          echo '```diff'
+          cat logs/diff.txt
+          echo '```'
+        } >> "$GITHUB_STEP_SUMMARY"
+        exit 1
+
+    - name: Show server output
+      if: always()
+      run: cat logs/server.txt || true
+
+    - name: Stop the server
+      if: always()
+      run: |
+        if [ -f server.pid ]; then
+          kill "$(cat server.pid)" 2>/dev/null || true
+        fi
+
+    - name: Upload grading logs
+      if: always()
+      uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+      with:
+        name: name-server
+        path: logs/
+        if-no-files-found: ignore
