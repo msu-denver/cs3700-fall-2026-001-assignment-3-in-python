@@ -78,7 +78,7 @@ jobs:
         }
 
         found=0
-        for pattern in 'import Pyro5' 'from Pyro5' 'Pyro5\.nameserver' 'pyro5-ns'; do
+        for pattern in 'import Pyro5' 'from Pyro5' 'pyro5-ns'; do
           if search_student_code "$pattern"; then
             echo "::error::Found '$pattern'. The name server must be written from scratch."
             found=1
@@ -269,7 +269,7 @@ jobs:
           "    metadata: {'class:Pyro5.nameserver.NameServer'}" \
           '--------END LIST ' > logs/expected.txt
 
-        timeout 30 pyro5-nsc list > logs/actual.txt 2> logs/nsc-errors.txt || true
+        timeout 30 pyro5-nsc -n 127.0.0.1 list > logs/actual.txt 2> logs/nsc-errors.txt || true
 
         if diff -u logs/expected.txt logs/actual.txt > logs/diff.txt; then
           echo "✓ pyro5-nsc list output matches" | tee -a "$GITHUB_STEP_SUMMARY"
