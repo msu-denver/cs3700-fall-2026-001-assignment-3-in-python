@@ -74,11 +74,14 @@ jobs:
       run: |
         # Tests may use Pyro5 to check the server; the server itself may not.
         search_student_code() {
-          grep -rn -E "$1" . --include='*.py' --exclude='test_*.py' --exclude-dir=tests --exclude-dir=.git
+          grep -rn -E -e "$1" . --include='*.py' --exclude='test_*.py' --exclude-dir=tests --exclude-dir=.git
         }
 
         found=0
-        for pattern in 'import Pyro5' 'from Pyro5' 'pyro5-ns'; do
+        # Not 'Pyro5.nameserver': the required metadata string
+        # 'class:Pyro5.nameserver.NameServer' contains it. 'pyro5-ns' must not
+        # match the pyro5-nsc client, and '-m Pyro5' catches launching the real server.
+        for pattern in '^\s*(import|from) Pyro5' 'pyro5-ns([^c]|$)' '-m Pyro5'; do
           if search_student_code "$pattern"; then
             echo "::error::Found '$pattern'. The name server must be written from scratch."
             found=1
@@ -269,6 +272,8 @@ jobs:
           "    metadata: {'class:Pyro5.nameserver.NameServer'}" \
           '--------END LIST ' > logs/expected.txt
 
+        # -n 127.0.0.1: without it, pyro5-nsc can miss a server listening on
+        # localhost on the runner (the Oct 26, 2026 fix students were told about).
         timeout 30 pyro5-nsc -n 127.0.0.1 list > logs/actual.txt 2> logs/nsc-errors.txt || true
 
         if diff -u logs/expected.txt logs/actual.txt > logs/diff.txt; then
